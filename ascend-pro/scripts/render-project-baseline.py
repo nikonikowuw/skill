@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 DEFAULT_OUTPUT_CANDIDATES = (
-    ".agents/ascend-context.md",
+    ".agent/ascend-pro/context/{machine_id}.md",
     ".agent-context/ascend-baseline.md",
     "docs/ascend-baseline.md",
 )
@@ -38,8 +38,21 @@ DEVICE_PATTERN = re.compile(
 )
 ATC_PATTERN = re.compile(r"(?:ATC|atc)[^\n]*(?:version|Version)[^\n]*", re.IGNORECASE)
 CANN_ROOT_PATTERN = re.compile(r"(?:ASCEND_HOME_PATH|ASCEND_TOOLKIT_HOME)=([^\n]*)")
-CHIP_SN_PATTERN = re.compile(r"Chip\s*Sn[\s:]*(\w+)", re.IGNORECASE)
-SERIAL_PATTERN = re.compile(r"Serial\s*(?:Number|No\.?)[\s:]*(\w+)", re.IGNORECASE)
+# Multi-pattern fallback for device identity key (tried in order)
+# Primary: /etc/machine-id (stable, always available on Linux)
+# Fallback: npu-smi output (format varies by version)
+DEVICE_ID_PATTERNS = [
+    # /etc/machine-id output — a standalone 32-char hex string on its own line
+    re.compile(r"(?:^|\n)([a-f0-9]{32})(?:\n|$)", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"Machine[\s_]*(?:ID|Id)[\s:]*(\w+)", re.IGNORECASE),       # "Machine ID: ..."
+    # npu-smi board/chip info (format varies by version)
+    re.compile(r"Chip\s*Sn[\s:]*(\w+)", re.IGNORECASE),                    # "Chip Sn: 01234" / "ChipSn: 01234"
+    re.compile(r"Chip\s*Serial[\s:]*(\w+)", re.IGNORECASE),                # "Chip Serial: 01234"
+    re.compile(r"Serial\s*(?:Number|No\.?)[\s:]*(\w+)", re.IGNORECASE),   # "Serial Number: 01234"
+    re.compile(r"Board\s*(?:ID|Sn|Serial)[\s:]*(\w+)", re.IGNORECASE),     # "Board ID: 01234"
+    re.compile(r"Chip\s*ID[\s:]*(\w+)", re.IGNORECASE),                    # "Chip ID: 01234"
+    re.compile(r"Device\s*(?:SN|Serial)[\s:]*(\w+)", re.IGNORECASE),        # "Device SN: 01234"
+]
 OM_PATTERN = re.compile(r"(?P<path>[^\s'\"()]+\.om)\b")
 AIPP_PATTERN = re.compile(r"(?P<path>[^\s'\"()]*aipp[^\s'\"()]*\.(?:cfg|conf|ini))\b", re.IGNORECASE)
 CONTEXT_HEADER_PATTERN = re.compile(r"^==\s*Device Context:\s*(?P<label>.+?)\s*==\s*$", re.IGNORECASE | re.MULTILINE)
@@ -51,14 +64,25 @@ def load_text(path_arg):
     return sys.stdin.read()
 
 
-def choose_default_output_path():
-    cwd = Path.cwd()
-    for candidate in DEFAULT_OUTPUT_CANDIDATES:
-        path = cwd / candidate
-        parent = path.parent
-        if parent.exists() and parent.is_dir():
-            return path
-    return cwd / DEFAULT_OUTPUT_CANDIDATES[0]
+def extract_machine_id(text):
+    """Extract device identity key from pasted evidence.
+    
+    Tries /etc/machine-id first (a 32-char hex string on its own line),
+    then falls back to npu-smi serial number patterns.
+    """
+    for pattern in DEVICE_ID_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1).strip()
+    return "unknown"
+
+
+def choose_default_output_path(text):
+    """Extract machine_id from pasted evidence and return .agent/ascend-pro/context/{machine_id}.md."""
+    machine_id = extract_machine_id(text)
+    if machine_id == "unknown":
+        print("Warning: machine ID not found in evidence, using 'unknown' as filename.", file=sys.stderr)
+    return Path.cwd() / ".agent" / "ascend-pro" / "context" / f"{machine_id}.md"
 
 
 def first_match(pattern, text, group=1, default="unknown"):
@@ -181,13 +205,14 @@ def build_baseline(text):
     kernel = first_match(KERNEL_PATTERN, text)
     os_release = first_match(OS_RELEASE_PATTERN, text)
     atc_version = first_match(ATC_PATTERN, text, 0)
-    chip_sn = first_match(CHIP_SN_PATTERN, text)
-    if chip_sn == "unknown":
-        chip_sn = first_match(SERIAL_PATTERN, text)
+    machine_id = extract_machine_id(text)
 
     open_risks = []
-    if chip_sn == "unknown":
-        open_risks.append("Chip serial number not found. Run 'npu-smi info -t board' to get chip_sn.")
+    if machine_id == "unknown":
+        open_risks.append("Machine ID not found. Run 'cat /etc/machine-id' on the target device and include the output.")
+    else:
+        # Ensure machine_id is clean (first line, lowercase, 32 hex chars)
+        machine_id = machine_id.split()[0].lower() if machine_id != "unknown" else "unknown"
     if not devices:
         open_risks.append("Device model not identified from pasted evidence.")
     if kernel == "unknown":
@@ -216,7 +241,7 @@ def build_baseline(text):
         "- Aggregated discovery sections below are not implementation context when multiple devices or CANN roots exist; use the device-scoped runtime context section.",
         "",
         "Device baseline",
-        f"- Chip serial number: {chip_sn}  (unique hardware identifier; context key)",
+        f"- Machine ID: {machine_id}  (from /etc/machine-id; context key)",
         f"- Device model candidates: {summarize_list(devices)}",
         f"- Device nodes: {summarize_list(nodes)}",
         "",
@@ -292,7 +317,7 @@ def main():
     parser = argparse.ArgumentParser(description="Render an Ascend project baseline from pasted device evidence.")
     parser.add_argument("input", nargs="?", help="Optional text file containing pasted device evidence. Reads stdin if omitted.")
     parser.add_argument("-o", "--output", help="Optional markdown output file path.")
-    parser.add_argument("--write-default", action="store_true", help="Write to the recommended project path. Prefers .agent-context/ascend-baseline.md, then docs/ascend-baseline.md.")
+    parser.add_argument("--write-default", action="store_true", help="Auto-detect machine_id from /etc/machine-id (or npu-smi fallback) and write to .agent/ascend-pro/context/{machine_id}.md.")
     args = parser.parse_args()
 
     text = load_text(args.input)
@@ -309,7 +334,7 @@ def main():
     if args.output:
         output_path = Path(args.output)
     elif args.write_default:
-        output_path = choose_default_output_path()
+        output_path = choose_default_output_path(text)
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

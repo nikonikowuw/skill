@@ -16,22 +16,25 @@ If the project supports multiple device models, tell the user to run the checkli
 
 Without labels, host, container, and device-specific `.so` facts are easy to mix.
 
-> ⚠️ **Device serial number is mandatory.** The chip serial number (`chip_sn`) uniquely identifies a physical device. Even same-model devices with different driver versions are separate contexts. Always collect it.
+> ⚠️ **Machine ID is mandatory.** The machine ID (`cat /etc/machine-id`) uniquely identifies the device. Even same-model devices with different driver versions are separate contexts. Always collect it.
 
 ## Host Or Bare-Metal Device
 
 ```bash
+cat /etc/machine-id                      # device context key (PRIMARY)
 uname -a
 cat /etc/os-release
 npu-smi info
-npu-smi info -t board 2>/dev/null || true
-npu-smi info -t chip 2>/dev/null || true
+npu-smi info -t board -i 0 2>/dev/null || npu-smi info -t board 2>/dev/null || true
+npu-smi info -t chip -i 0 2>/dev/null || npu-smi info -t chip 2>/dev/null || true
 npu-smi info -t usages 2>/dev/null || true
 ls -l /dev/davinci* /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc 2>/dev/null
 groups
 ```
 
-The serial number is in the output of `npu-smi info -t board` (look for `Chip Sn` or `Serial Number`). Record it as the context key.
+The machine ID (`cat /etc/machine-id`) is the primary context key — it is stable, unique per
+machine, and works regardless of driver version or container permissions. The serial number
+from `npu-smi info -t board` serves as fallback if machine-id is unavailable.
 
 ## CANN Tools And Environment
 

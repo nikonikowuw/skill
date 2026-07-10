@@ -22,11 +22,13 @@ Before changing code, I need the target Ascend device and runtime baseline. On A
 
 Please run these on the target device, and if the app runs in a container, run the library and environment checks both on the host and inside the container. If you have multiple Ascend or Atlas device models, paste one labeled block per device, for example `== Device Context: Ascend310P host ==`.
 
-1. Device and OS identity
+1. Device identity and OS
+   cat /etc/machine-id                   # device context key
    uname -a
    cat /etc/os-release
    npu-smi info
-   npu-smi info -t board 2>/dev/null || true
+   npu-smi info -t board -i 0 2>/dev/null || npu-smi info -t board 2>/dev/null || true
+   npu-smi info -t chip -i 0 2>/dev/null || npu-smi info -t chip 2>/dev/null || true
 
 2. Device nodes and permissions
    ls -l /dev/davinci* /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc 2>/dev/null
@@ -57,4 +59,4 @@ After you paste that, I will turn it into a compact device-scoped project baseli
 
 ## Reference
 
-For the full command set and fallback instructions, use [device-command-checklist.md](device-command-checklist.md). After generating a baseline draft, review it with [baseline-review-checklist.md](baseline-review-checklist.md). Store the reviewed version as `.agents/ascend-context.md` (see [baseline-file-convention.md](baseline-file-convention.md)).
+For the full command set and fallback instructions, use [device-command-checklist.md](device-command-checklist.md). After generating a baseline draft, review it with [baseline-review-checklist.md](baseline-review-checklist.md). Store the reviewed version as `.agent/ascend-pro/context/{machine_id}.md` (see [baseline-file-convention.md](baseline-file-convention.md) and the [context.md format](../SKILL.md#contextmd-document-format)).

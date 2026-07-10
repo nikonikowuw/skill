@@ -8,24 +8,24 @@ Use this reference whenever a project or conversation mentions more than one Asc
 
 Treat each target runtime as an indivisible context:
 
-`chip serial number + device model + driver/firmware + CANN root + runtime .so set + headers + Python packages + container or host environment + OM artifact`
+`machine ID + device model + driver/firmware + CANN root + runtime .so set + headers + Python packages + container or host environment + OM artifact`
 
-The **chip serial number** (`chip_sn`) is the unique identifier. Even the same device model with a different driver version is a different context. Always verify the serial number matches before reusing a cached context.
+The **machine ID** (`machine_id`, from `/etc/machine-id`) is the unique identifier. Even the same device model with a different driver version is a different context. Always verify the machine ID matches before reusing a cached context.
 
-Do not carry a library path, exported symbol, ATC flag, AIPP config, or performance conclusion from one context into another unless the evidence explicitly proves they are the same (same serial number, same driver, same CANN version).
+Do not carry a library path, exported symbol, ATC flag, AIPP config, or performance conclusion from one context into another unless the evidence explicitly proves they are the same (same machine ID, same driver, same CANN version).
 
 ## Context ID
 
-Assign a context ID that includes the chip serial number:
+Assign a context ID that includes the machine ID:
 
 ```text
-<chip-sn>-<device-model>-<host-or-container>-<purpose>
+<abbreviated-machine-id>-<device-model>-<host-or-container>-<purpose>
 ```
 
 Examples:
 
-- `SN0123456789-Ascend310P-host-video-infer`
-- `SN9876543210-Atlas200I-A2-container-edge-app`
+- `abc123def456-Ascend310P-host-video-infer`
+- `fedcba098765-Atlas200I-A2-container-edge-app`
 - `SN1122334455-Ascend910B-host-batch-infer`
 
 When reporting or handing off context, put the active ID first. The serial number ensures you never confuse two physically different devices.
@@ -34,7 +34,7 @@ When reporting or handing off context, put the active ID first. The serial numbe
 
 For each device-scoped context, record:
 
-- **Chip serial number** (`chip_sn`) — mandatory, unique per device. Get via `npu-smi info -t board`.
+- **Machine ID** (`machine_id`) — mandatory, unique per machine. Get via `cat /etc/machine-id`.
 - Device model and NPU count.
 - Driver and firmware versions.
 - Kernel and OS image.
