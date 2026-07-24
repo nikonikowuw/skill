@@ -3,10 +3,14 @@ name: rknn-pro
 description: >
   Expert on Rockchip RKNN inference and media pipelines on RK3568 and RK3576 Linux systems —
   PyTorch/TF → ONNX → RKNN model conversion, zero-copy DMA-BUF pipeline design, RGA preprocessing,
-  MPP video decode/encode, RKNN Runtime API usage, device-environment baselining, and memory alignment.
+  MPP video decode/encode, RKNN Runtime API/header compatibility, CMake feature detection,
+  device-environment baselining, tensor allocation, memory/stride alignment, and comprehensive
+  project-wide crash-risk audits for overflow, out-of-bounds access, allocation/lifetime errors,
+  resource exhaustion, cache/synchronization faults, service crashes, and kernel crashes.
   Use this skill whenever the user mentions Rockchip, RKNN, RK3568, RK3576, MPP, RGA, librga, rknn-toolkit2,
-  rknn Runtime, NPU, DMA-BUF, or Rockchip media pipelines. It replaces the old rockchip-performance skill
-  with broader scope.
+  rknn Runtime, NPU, DMA-BUF, Rockchip media pipelines, segmentation faults, kernel panic, system reboot,
+  memory corruption, overflow, bounds, alignment, or asks for a full safety/stability audit of a Rockchip
+  project. It replaces the old rockchip-performance skill with broader scope.
 ---
 
 # rknn-pro
@@ -19,7 +23,9 @@ Prefer C/C++ for product runtime; use Python for model conversion, environment i
 
 ## Session Start: Device Identity Verification
 
-**Every session** must verify the current board's serial number before using any cached context.
+Before using cached board context or making board-specific compatibility claims, verify the current
+board's serial number. A source-only audit may start immediately, but mark allocator/driver/SoC
+conclusions as unverified until the device context is selected.
 
 ### Step 1 — Read existing context (if any)
 
@@ -54,7 +60,59 @@ The user pastes back the serial number (e.g., `Serial: 0123456789abcdef`).
    - **Model conversion** → route to [model-conversion.md](references/model-conversion.md) (PT/TF→ONNX→RKNN).
    - **Inference pipeline** → route to [zero-copy-pipeline.md](references/zero-copy-pipeline.md).
    - **API query** → route to [rknn-api-reference.md](references/rknn-api-reference.md), [rga-api-reference.md](references/rga-api-reference.md), or [mpp-api-reference.md](references/mpp-api-reference.md).
+   - **RKNN SDK/header upgrade, tensor allocation, or RGA stride bug** → read
+     [memory-alignment.md](references/memory-alignment.md), then the RKNN and RGA API references.
+   - **Overflow, out-of-bounds, allocation/alignment/lifetime fault, service crash, kernel panic, or
+     comprehensive project safety audit** → read
+     [project-crash-risk-audit.md](references/project-crash-risk-audit.md) and
+     [known-crash-patterns.md](references/known-crash-patterns.md).
 3. **For pipeline work**: draw buffer path → prefer DMA-BUF handoff → prove copies → tune one bottleneck.
+
+### Project Crash-Risk Audit
+
+When the user asks whether a project can crash a service or system, use the full audit procedure.
+Do not reduce the task to regex searches or only inspect the named algorithm package.
+
+1. Declare production source roots, languages, exclusions, SoCs, sysroots, algorithm packages, and
+   build variants. If `.codegraph/` exists, use CodeGraph first and scope it to production paths.
+2. Run `scripts/audit-rockchip-memory-safety.py` to produce a sensitive-API inventory and candidate
+   list. Automated matches remain candidates until manually traced.
+3. Build a per-buffer ledger from external dimensions through size calculation, allocation/import,
+   RGA wrapping, RKNN/MPP use, CPU access, synchronization, and release.
+4. Review integer overflow, bounds, format/stride/plane layout, return codes, partial cleanup,
+   ownership, fd/mmap/ref pairing, cache sync, asynchronous lifetime, reload/info-change, shutdown,
+   queue limits, and version/ABI selection.
+5. Compile and analyze every duplicated algorithm/SoC variant. Use available compiler diagnostics,
+   static analyzers, sanitizers for CPU-side code, tests, and controlled failure injection.
+6. Correlate exact board logs with official constraints and matching versions. Treat public issue
+   reports as investigation clues unless official evidence confirms the cause.
+7. Report findings first, ordered by severity, with confidence, failure path, violated invariant,
+   impact, fix, regression verification, coverage gaps, and residual board-dependent risk.
+
+Do not claim a comprehensive clean result unless the completion gate in
+[project-crash-risk-audit.md](references/project-crash-risk-audit.md) is satisfied. Never enable
+driver debug controls or fault injection that can panic the kernel without explicit user approval,
+recovery access, and a non-production test plan.
+
+### RKNN Header Compatibility and Stride Safety
+
+When changing an algorithm package such as `face`, `yolov5`, or `yolov8`, audit every duplicated
+`CMakeLists.txt`, `rknn_model.cpp`, and RGA helper instead of fixing only the first package found.
+
+1. Use CMake structure-member checks against the actual target `rknn_api.h`; prefer
+   `rknn_tensor_attr.size_with_stride` when present and fall back to `size` for older headers.
+2. Export the feature result as a target compile definition. Do not reference `size_with_stride`
+   unconditionally in C++, because projects may still build against RKNN API 1.x headers.
+3. Before every `rknn_create_mem`, take the maximum of the logical tensor size and the runtime's
+   stride-aware size when available. For RGA-written inputs, also include the bytes required by the
+   real RGA destination strides. Check arithmetic overflow, then round the result up to the
+   allocator/page boundary.
+4. Treat the queried NPU input `w_stride` and `h_stride` as the destination layout contract.
+   Pass them through `RgaHelper` and into `wrapbuffer_fd` or `wrapbuffer_handle` explicitly.
+5. Keep allocation, RGA wrapping, and `rknn_set_io_mem` on the same width/height/format/stride
+   description. A larger allocation alone cannot repair a mismatched row layout.
+
+Use the build and C++ templates in [memory-alignment.md](references/memory-alignment.md).
 
 ### Zero-Copy Audit
 
@@ -114,6 +172,8 @@ Example: `0123456789abcdef-RK3568-host-video-infer`
 - `scripts/detect-rockchip-env.sh`
 - `scripts/collect-rockchip-debug.sh`
 - `scripts/render-project-baseline.py`
+- `scripts/audit-rockchip-memory-safety.py`
+- `scripts/collect-rockchip-crash-evidence.sh`
 
 ## References
 
@@ -133,6 +193,8 @@ Example: `0123456789abcdef-RK3568-host-video-infer`
 | [zero-copy-pipeline.md](references/zero-copy-pipeline.md) | DMA-BUF pipeline, MPP/RGA zero-copy patterns |
 | [zero-copy-check.md](references/zero-copy-check.md) | **Audit procedure** — dispatch subagent to check if implementation achieves max zero-copy |
 | [perf-debugging.md](references/perf-debugging.md) | Throughput, CPU load, hidden copies, sync waits |
+| [project-crash-risk-audit.md](references/project-crash-risk-audit.md) | **Comprehensive safety audit** — overflow, bounds, allocation, lifetime, synchronization, resource exhaustion, service/kernel crash risk |
+| [known-crash-patterns.md](references/known-crash-patterns.md) | Official RKNN/RGA/MPP/DMA-BUF failure modes and carefully labeled community cases |
 
 ### New references for rknn-pro
 
@@ -142,7 +204,7 @@ Example: `0123456789abcdef-RK3568-host-video-infer`
 | [rknn-api-reference.md](references/rknn-api-reference.md) | RKNN Runtime API signatures, parameters, memory modes |
 | [rga-api-reference.md](references/rga-api-reference.md) | RGA im2d API, DMA-BUF import, format/alignment constraints |
 | [mpp-api-reference.md](references/mpp-api-reference.md) | MPP decode/encode, external buffer mode, buffer pool |
-| [memory-alignment.md](references/memory-alignment.md) | **Critical**: RGA stride alignment, MPP buffer size formulas |
+| [memory-alignment.md](references/memory-alignment.md) | **Critical**: RKNN `size_with_stride` compatibility, allocation fallback, RGA/MPP stride formulas |
 
 ## Key API Signatures (Inline Quick Reference)
 
@@ -277,6 +339,13 @@ Runtime context = `board_serial + SoC + kernel/BSP + driver versions + .so set +
 - [ ] Is implicit conversion, cache sync, or software copy occurring?
 - [ ] Is RGA used only where format/resize/crop/CSC is actually needed?
 - [ ] Do RKNN inputs/outputs use runtime-managed or imported memory?
+- [ ] Does CMake prefer `size_with_stride` while still compiling with older RKNN headers?
+- [ ] Does `rknn_create_mem` cover tensor size, stride-derived size, and page alignment?
+- [ ] Does the RGA destination use the queried NPU `w_stride` / `h_stride` explicitly?
+- [ ] Can every byte count, plane offset, ROI, tensor index, and alignment operation be proven not to overflow or exceed its allocation?
+- [ ] Are all fd/mmap/RKNN/RGA/MPP acquisitions, references, async users, and releases paired across success, failure, reload, and shutdown?
+- [ ] Are queues and hardware buffer pools bounded so a long-running service cannot exhaust system or DMA memory?
+- [ ] Are cache synchronization, fences, and buffer reuse ordered across CPU, RGA, MPP, and NPU access?
 - [ ] Does CPU postprocess dominate after NPU inference?
 
 ## Operating Rules
@@ -298,7 +367,8 @@ Runtime context = `board_serial + SoC + kernel/BSP + driver versions + .so set +
 For substantial tasks produce:
 1. Device-scoped project baseline
 2. Buffer-flow summary
-3. Bottleneck hypothesis
-4. Code or config changes
-5. Measurement method
-6. Unverified board-specific risks
+3. For safety audits: coverage/exclusion matrix and buffer ownership/layout ledger
+4. Findings ordered by severity and confidence, with exact failure paths
+5. Code or config changes
+6. Regression and measurement method
+7. Unverified board-specific risks

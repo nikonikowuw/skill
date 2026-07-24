@@ -89,6 +89,20 @@ Create an `rga_buffer_t` from a previously imported buffer handle.
 | `w_stride` | Width stride (aligned width). Must meet format alignment requirements |
 | `h_stride` | Height stride (aligned height) |
 
+Librga headers commonly expose this stride-aware macro invocation:
+
+```c
+rga_buffer_t dst = wrapbuffer_fd(fd, width, height, format, w_stride, h_stride);
+```
+
+When the destination fd is an RKNN input allocation, pass the queried model input
+`w_stride` / `h_stride` explicitly. The short/default-stride wrapper can describe a tightly packed
+buffer even when RKNN allocated or expects padded rows.
+
+The underlying C symbol may be declared as
+`wrapbuffer_fd_t(fd, width, height, w_stride, h_stride, format)`, with a different parameter order.
+Follow the installed header and do not substitute the `_t` symbol's order into the public macro call.
+
 ### `wrapbuffer_virtualaddr`
 
 ```c
@@ -221,6 +235,32 @@ int size = w_stride * h_stride * 3 / 2;
 ```
 
 **Critical: `importbuffer_fd()` is expensive — call once per buffer, reuse handles.**
+
+### RKNN destination contract
+
+For RGA preprocessing directly into NPU input memory, derive the destination layout from the RKNN
+input attribute and carry it through the RGA helper API:
+
+```cpp
+const rknn_tensor_attr& input_attr = model->GetInputAttr(0);
+const int dst_w_stride = input_attr.w_stride != 0
+    ? static_cast<int>(input_attr.w_stride)
+    : model_width;
+const int dst_h_stride = input_attr.h_stride != 0
+    ? static_cast<int>(input_attr.h_stride)
+    : model_height;
+
+rga_buffer_t dst = wrapbuffer_fd(dst_fd,
+                                 model_width,
+                                 model_height,
+                                 RK_FORMAT_RGB_888,
+                                 dst_w_stride,
+                                 dst_h_stride);
+```
+
+Use `wrapbuffer_handle(..., dst_w_stride, dst_h_stride)` when the installed librga does not expose
+the stride-aware fd overload. Size the backing DMA-BUF from these same strides and the pixel format,
+not merely from `model_width * model_height`. Run `imcheck` before the operation.
 
 ---
 

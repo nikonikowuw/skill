@@ -4,6 +4,18 @@ Rockchip hardware (RGA, MPP, RKNN NPU) enforces strict alignment requirements on
 widths, heights, strides, and total sizes. Misaligned buffers cause silent data corruption or
 runtime errors.
 
+## Contents
+
+- [Quick Reference Table](#quick-reference-table)
+- [Alignment Calculation Functions](#alignment-calculation-functions)
+- [RKNN Memory Alignment Detail](#rknn-memory-alignment-detail)
+- [Why Alignment Matters](#why-alignment-matters)
+- [RGA Format-Specific Alignment](#rga-format-specific-alignment)
+- [MPP Buffer Sizing](#mpp-buffer-sizing)
+- [RKNN Tensor Stride](#rknn-tensor-stride)
+- [Common Mistakes](#common-mistakes)
+- [Verification Snippet](#verification-snippet)
+
 ## Quick Reference Table
 
 | Operation | Width Stride Align | Height Stride Align | Buffer Addr Align | Size Formula |
@@ -15,7 +27,7 @@ runtime errors.
 | **MPP** decode (YUV420SP) | 16 | 16 | varies | `ws * hs * 2` (safe) |
 | **MPP** encode (YUV420SP) | 16 | 16 | varies | `ws * hs * 3 / 2` |
 | **RKNN** `rknn_inputs_set` (host→NPU copy) | model-defined stride | model-defined stride | 4 (FP32) / 2 (FP16) / 1 (UINT8) | from `rknn_tensor_attr.size` |
-| **RKNN** `rknn_create_mem` (NPU-side) | model-defined stride | model-defined stride | page (4KB, dma-heap) | as requested |
+| **RKNN** `rknn_create_mem` (NPU-side) | model-defined stride | model-defined stride | page (commonly 4KB, verify target) | `max(size, size_with_stride, stride-derived bytes)`, page-aligned |
 | **RKNN** `rknn_create_mem_from_fd` (DMA-BUF import) | set w_stride to match source | set h_stride to match source | page (4KB, from source allocator) | from source buffer |
 | **RKNN** w_stride / h_stride in `rknn_set_io_mem` | must match actual buffer stride (query via `rknn_query`) | must match actual buffer stride | N/A | from `rknn_tensor_attr` |
 | **DMA-BUF** dma_heap | 4 (varies) | 4 (varies) | page (4KB) | as requested |
@@ -72,6 +84,86 @@ def mpp_decode_size(width, height):
 
 RKNN memory alignment depends on the **data path**:
 
+### Build-time compatibility: prefer `size_with_stride`
+
+RKNN headers are not uniform across BSP/runtime releases. API 2.x headers commonly expose
+`rknn_tensor_attr.size_with_stride`, while older headers may expose only `size`. Detect the member
+in every independently built algorithm target instead of inferring it from a version string.
+
+```cmake
+include(CheckStructHasMember)
+
+# Point this at the same RKNN include directory used by the algorithm target.
+set(_RKNN_SAVED_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES}")
+set(CMAKE_REQUIRED_INCLUDES "${RKNN_INCLUDE_DIRS}")
+
+check_struct_has_member(
+    "struct _rknn_tensor_attr"
+    size_with_stride
+    "rknn_api.h"
+    RKNN_HAVE_SIZE_WITH_STRIDE)
+if(NOT RKNN_HAVE_SIZE_WITH_STRIDE)
+    check_struct_has_member(
+        "struct _rknn_tensor_attr" nbytes "rknn_api.h" RKNN_HAVE_NBYTES)
+endif()
+if(NOT RKNN_HAVE_SIZE_WITH_STRIDE AND NOT RKNN_HAVE_NBYTES)
+    check_struct_has_member(
+        "struct _rknn_tensor_attr" n_size "rknn_api.h" RKNN_HAVE_N_SIZE)
+endif()
+# Detect size independently: newer headers commonly expose it beside size_with_stride,
+# while some legacy variants may use only nbytes or n_size.
+check_struct_has_member(
+    "struct _rknn_tensor_attr" size "rknn_api.h" RKNN_HAVE_SIZE)
+
+set(CMAKE_REQUIRED_INCLUDES "${_RKNN_SAVED_REQUIRED_INCLUDES}")
+unset(_RKNN_SAVED_REQUIRED_INCLUDES)
+
+if(RKNN_HAVE_SIZE_WITH_STRIDE)
+    set(RKNN_TENSOR_SIZE_FIELD_NAME size_with_stride)
+    message(STATUS "RKNN tensor size field: size_with_stride (API 2.x)")
+elseif(RKNN_HAVE_NBYTES)
+    set(RKNN_TENSOR_SIZE_FIELD_NAME nbytes)
+    message(STATUS "RKNN tensor size field: nbytes")
+elseif(RKNN_HAVE_N_SIZE)
+    set(RKNN_TENSOR_SIZE_FIELD_NAME n_size)
+    message(STATUS "RKNN tensor size field: n_size")
+elseif(RKNN_HAVE_SIZE)
+    set(RKNN_TENSOR_SIZE_FIELD_NAME size)
+    message(STATUS "RKNN tensor size field: size (legacy API)")
+else()
+    message(FATAL_ERROR
+        "rknn_tensor_attr has none of size_with_stride, nbytes, n_size, or size")
+endif()
+
+target_compile_definitions(${ALGORITHM_TARGET} PRIVATE
+    RKNN_TENSOR_SIZE_FIELD=${RKNN_TENSOR_SIZE_FIELD_NAME})
+if(RKNN_HAVE_SIZE_WITH_STRIDE)
+    target_compile_definitions(${ALGORITHM_TARGET} PRIVATE
+        RKNN_HAVE_SIZE_WITH_STRIDE=1)
+endif()
+if(RKNN_HAVE_SIZE)
+    target_compile_definitions(${ALGORITHM_TARGET} PRIVATE
+        RKNN_HAVE_SIZE=1)
+endif()
+```
+
+Adapt `RKNN_INCLUDE_DIRS` and `${ALGORITHM_TARGET}` to local target names. Apply the same feature
+test to separately packaged algorithms such as `face`, `yolov5`, and `yolov8`; do not assume one
+package's CMake result propagates to another target or directory.
+
+`check_struct_has_member` results are cached. When switching sysroots, BSPs, or RKNN header roots in
+one build directory, clear the affected CMake cache or use a fresh build directory before trusting
+the result.
+
+Use the exported `RKNN_TENSOR_SIZE_FIELD` macro where one selected field is sufficient:
+
+```cpp
+const uint32_t runtime_tensor_size = attr.RKNN_TENSOR_SIZE_FIELD;
+```
+
+For defensive allocation, keep the feature macro as well so C++ can compare both fields when the
+new member exists.
+
 ### Path 1: `rknn_inputs_set` (host memory → NPU, with internal copy)
 
 ```c
@@ -96,8 +188,92 @@ rknn_tensor_mem *mem = rknn_create_mem(ctx, size);
 ```
 
 - Allocated from dma-heap / ion, physically contiguous.
-- Address is **page-aligned (4KB)** — more than enough for NPU access.
+- Address is page-aligned by the runtime allocator; the common Linux page size is 4KB, but verify
+  the target allocator rather than baking that assumption into cross-platform code.
 - Use with `rknn_set_io_mem` to bind to a tensor.
+
+#### Defensive input allocation
+
+For every tensor allocation, compare the selected compatibility field with `size` and, on
+stride-aware headers, `size_with_stride`. For an input that RGA writes directly, also cover the
+bytes RGA will write using the exact destination format and NPU strides. Round the result up only
+after all applicable minimum sizes have been compared.
+
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <unistd.h>
+
+static size_t CheckedMul(size_t lhs, size_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs) {
+        throw std::overflow_error("RKNN/RGA buffer size overflow");
+    }
+    return lhs * rhs;
+}
+
+static size_t AlignUpChecked(size_t value, size_t alignment) {
+    if (alignment == 0 || value > std::numeric_limits<size_t>::max() - (alignment - 1)) {
+        throw std::overflow_error("RKNN allocation alignment overflow");
+    }
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+static size_t RgaTensorBytes(uint32_t w_stride,
+                             uint32_t h_stride,
+                             int format) {
+    const size_t pixels = CheckedMul(w_stride, h_stride);
+    switch (format) {
+    case RK_FORMAT_RGB_888:
+        return CheckedMul(pixels, 3);
+    case RK_FORMAT_RGBA_8888:
+    case RK_FORMAT_BGRA_8888:
+        return CheckedMul(pixels, 4);
+    case RK_FORMAT_RGB_565:
+        return CheckedMul(pixels, 2);
+    case RK_FORMAT_YCbCr_420_SP:
+    case RK_FORMAT_YCrCb_420_SP:
+        if ((w_stride & 1U) != 0 || (h_stride & 1U) != 0) {
+            throw std::invalid_argument("YUV420 stride must be even");
+        }
+        return CheckedMul(pixels, 3) / 2;
+    default:
+        throw std::invalid_argument("unsupported RGA destination format");
+    }
+}
+
+const rknn_tensor_attr& attr = input_attrs_[i];
+const uint32_t dst_w_stride = attr.w_stride != 0 ? attr.w_stride : model_width;
+const uint32_t dst_h_stride = attr.h_stride != 0 ? attr.h_stride : model_height;
+
+size_t alloc_size = attr.RKNN_TENSOR_SIZE_FIELD;
+#if defined(RKNN_HAVE_SIZE)
+alloc_size = std::max(alloc_size, static_cast<size_t>(attr.size));
+#endif
+#if defined(RKNN_HAVE_SIZE_WITH_STRIDE)
+alloc_size = std::max(alloc_size, static_cast<size_t>(attr.size_with_stride));
+#endif
+alloc_size = std::max(
+    alloc_size,
+    RgaTensorBytes(dst_w_stride, dst_h_stride, rga_dst_format));
+
+const long page_size_value = sysconf(_SC_PAGESIZE);
+if (page_size_value <= 0) {
+    throw std::runtime_error("failed to query system page size");
+}
+alloc_size = AlignUpChecked(alloc_size, static_cast<size_t>(page_size_value));
+
+input_mems_[i] = rknn_create_mem(ctx_, alloc_size);
+if (input_mems_[i] == nullptr) {
+    throw std::runtime_error("rknn_create_mem failed");
+}
+```
+
+If the project already has checked arithmetic, format-size, or page-alignment helpers, use those
+instead of adding duplicates. For multi-plane formats or BSP-specific layouts, use the allocator's
+authoritative size formula; the switch above is a minimum template, not a universal format table.
 
 ### Path 3: `rknn_create_mem_from_fd` (DMA-BUF import, zero-copy)
 
@@ -117,16 +293,61 @@ rknn_tensor_attr attr;
 attr.index = 0;
 rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &attr, sizeof(attr));
 
-// Override stride to match actual buffer (e.g., from RGA)
-attr.w_stride = 640;     // actual buffer width stride (not necessarily 640)
-attr.h_stride = 640;
+// For an RGA-produced model input, make RGA write this queried layout.
+const uint32_t dst_w_stride = attr.w_stride != 0 ? attr.w_stride : model_width;
+const uint32_t dst_h_stride = attr.h_stride != 0 ? attr.h_stride : model_height;
+rga_helper.ResizeToFd(src_fd, dst_fd, model_width, model_height,
+                      dst_w_stride, dst_h_stride, RK_FORMAT_RGB_888);
 rknn_set_io_mem(ctx, mem, &attr);
 ```
 
 - `w_stride` is in **elements** (not bytes) for NHWC/NCHW formats.
 - If w_stride ≠ width, the NPU reads `w_stride` elements per row, skipping the padding.
 - Incorrect w_stride/h_stride cause **garbage output** (NPU reads wrong memory locations).
-- Query the model's default stride with `rknn_query` and adjust.
+- For a buffer created specifically as model input, query the model stride and make RGA use it.
+- For an externally owned/imported buffer, verify its real layout is accepted by the runtime before
+  changing tensor attributes. Never relabel a buffer with strides it does not physically have.
+
+### RGA helper must carry the NPU destination stride
+
+Do not let a helper drop `w_stride` / `h_stride` and call the default-stride `wrapbuffer_fd` form.
+Make the destination layout explicit at the interface boundary:
+
+```cpp
+IM_STATUS RgaHelper::ResizeToFd(int src_fd,
+                               int dst_fd,
+                               int dst_width,
+                               int dst_height,
+                               int dst_w_stride,
+                               int dst_h_stride,
+                               int dst_format) {
+    rga_buffer_t dst = wrapbuffer_fd(dst_fd,
+                                     dst_width,
+                                     dst_height,
+                                     dst_format,
+                                     dst_w_stride,
+                                     dst_h_stride);
+    // Wrap src with its own real dimensions and strides, run imcheck, then resize/convert.
+    // ...
+}
+
+const auto& input_attr = model->GetInputAttr(0);
+const int dst_w_stride = input_attr.w_stride != 0
+    ? static_cast<int>(input_attr.w_stride)
+    : model_width;
+const int dst_h_stride = input_attr.h_stride != 0
+    ? static_cast<int>(input_attr.h_stride)
+    : model_height;
+
+rga_helper.ResizeToFd(src_fd, input_mems_[0]->fd,
+                      model_width, model_height,
+                      dst_w_stride, dst_h_stride,
+                      RK_FORMAT_RGB_888);
+```
+
+If the installed librga lacks the stride-aware `wrapbuffer_fd` macro form, import the fd once and call
+`wrapbuffer_handle(handle, width, height, format, w_stride, h_stride)`. The invariant is the same:
+RGA destination wrapping, allocation size, and RKNN tensor binding describe one physical layout.
 
 ## Why Alignment Matters
 
@@ -211,6 +432,12 @@ If strides don't match, NPU will read/write at wrong offsets and output will be 
 4. **RKNN passthrough input without setting correct `w_stride`/`h_stride`** → NPU misreads data.
 5. **Reusing `importbuffer_fd` every frame** → performance regression (import is expensive; do once).
 6. **Assuming RK3568 and RK3576 have identical alignment requirements** → verify on target BSP.
+7. **Checking `size_with_stride` in only one algorithm package** → sibling packages keep the old,
+   undersized allocation path.
+8. **Allocating `attr.size` but wrapping the RGA destination with padded strides** → RGA can write
+   beyond the DMA-BUF even though the logical tensor dimensions look correct.
+9. **Increasing allocation without passing NPU strides to RGA** → avoids one overrun but keeps the
+   row layout inconsistent.
 
 ## Verification Snippet
 

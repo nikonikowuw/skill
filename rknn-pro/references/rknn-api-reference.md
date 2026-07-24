@@ -2,6 +2,15 @@
 
 Detailed parameter descriptions, calling sequences, and constraints for the Rockchip RKNN Runtime (C API).
 
+## Contents
+
+- [Initialization and Lifecycle](#initialization-and-lifecycle)
+- [Query](#query)
+- [Inference](#inference)
+- [Zero-Copy Memory Management](#zero-copy-memory-management)
+- [Multi-Core NPU](#multi-core-npu)
+- [Typical Calling Sequence](#typical-calling-sequence)
+
 ## Initialization and Lifecycle
 
 ### `rknn_init`
@@ -61,7 +70,7 @@ Query model and runtime information.
 | `RKNN_QUERY_PERF_DETAIL` | `rknn_perf_detail` | Performance breakdown per layer |
 | `RKNN_QUERY_MEM_SIZE` | `rknn_mem_size` | Memory usage of model |
 
-**Tensor attributes (`rknn_tensor_attr`):**
+**Illustrative tensor attributes (`rknn_tensor_attr`; exact fields are header-version dependent):**
 
 ```c
 typedef struct {
@@ -70,7 +79,8 @@ typedef struct {
     uint32_t dims[16];        // dimensions
     char name[256];           // tensor name
     uint32_t n_elems;         // number of elements
-    uint32_t size;            // total size in bytes
+    uint32_t size;            // logical/legacy total size in bytes
+    uint32_t size_with_stride;// stride-aware total size on newer API 2.x headers; feature-detect it
     rknn_tensor_fmt fmt;      // data format (NHWC/NCHW/...)
     rknn_tensor_type type;    // data type (INT8/INT16/FP16/FP32/UINT8)
     uint32_t w_stride;        // width stride (for zero-copy)
@@ -81,6 +91,12 @@ typedef struct {
     uint8_t zp;               // zero point (for asymmetric quantization)
 } rknn_tensor_attr;
 ```
+
+The exact structure differs across RKNN header releases. Do not copy this illustrative layout into
+compatibility code. Use CMake `check_struct_has_member` against the header selected by the target,
+prefer `size_with_stride` when present, and guard direct access to optional `size` and
+`size_with_stride` members independently. See
+[memory-alignment.md](memory-alignment.md) for the complete build and allocation pattern.
 
 ---
 
@@ -157,6 +173,9 @@ Create internal NPU-accessible memory. Returns handle for use with `rknn_set_io_
 
 - Memory is allocated in NPU address space (contiguous DMA memory).
 - Use for input/output buffers in zero-copy paths.
+- For every tensor allocation, compare the compatibility-selected size field, `size`, and
+  `size_with_stride` when available. For an RGA-written input, also include the bytes implied by
+  the actual destination strides; then apply the target allocator's page/alignment requirement.
 
 ### `rknn_create_mem_from_fd`
 
@@ -277,11 +296,13 @@ int rga_fd = get_rga_output_fd();
 // Import fd as NPU memory
 rknn_tensor_mem *input_mem = rknn_create_mem_from_fd(ctx, rga_fd, NULL, size, PROT_READ);
 
-// Set tensor attributes (use queried values, update w_stride/h_stride)
+// Keep the queried tensor layout and make RGA produce that exact destination layout.
 rknn_tensor_attr input_attr;
 input_attr.index = 0;
-input_attr.w_stride = aligned_width;   // from RGA output
-input_attr.h_stride = aligned_height;
+rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
+uint32_t dst_w_stride = input_attr.w_stride ? input_attr.w_stride : model_width;
+uint32_t dst_h_stride = input_attr.h_stride ? input_attr.h_stride : model_height;
+// Pass dst_w_stride/dst_h_stride to RGA wrapbuffer_fd/wrapbuffer_handle.
 rknn_set_io_mem(ctx, input_mem, &input_attr);
 
 // Run
